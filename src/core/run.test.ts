@@ -28,7 +28,7 @@ import {
   readFileSync,
 } from "node:fs";
 import { findLegacyRunBaseCommit, getHeadCommit } from "./git.js";
-import { setupRun, appendNotes, resumeRun } from "./run.js";
+import { setupRun, appendNotes, resumeRun, toStringArray } from "./run.js";
 
 const P = "/project";
 
@@ -253,5 +253,36 @@ describe("appendNotes", () => {
     appendNotes("/notes.md", 1, "summary", ["change"], []);
     const content = mockAppendFileSync.mock.calls[0][1] as string;
     expect(content).not.toContain("**Learnings:**");
+  });
+});
+
+describe("toStringArray", () => {
+  it("returns a proper array of strings as-is", () => {
+    expect(toStringArray(["a", "b"])).toEqual(["a", "b"]);
+  });
+
+  it("returns an empty array when input is an empty array", () => {
+    expect(toStringArray([])).toEqual([]);
+  });
+
+  it("filters out non-string elements from a mixed array", () => {
+    expect(toStringArray(["a", 2, null, "b"])).toEqual(["a", "b"]);
+  });
+
+  it("parses a JSON-stringified array back into strings", () => {
+    expect(toStringArray('["a", "b"]')).toEqual(["a", "b"]);
+  });
+
+  it("returns the raw string as a single-element array when it is not valid JSON", () => {
+    expect(toStringArray("not json")).toEqual(["not json"]);
+  });
+
+  it("returns an empty array for non-string, non-array primitives", () => {
+    expect(toStringArray(123)).toEqual([]);
+    expect(toStringArray(true)).toEqual([]);
+  });
+
+  it("returns an empty array for null", () => {
+    expect(toStringArray(null)).toEqual([]);
   });
 });

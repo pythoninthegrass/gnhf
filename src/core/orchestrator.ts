@@ -3,6 +3,7 @@ import { join } from "node:path";
 import type { Agent, AgentOutput, TokenUsage } from "./agents/types.js";
 import type { Config } from "./config.js";
 import type { RunInfo } from "./run.js";
+import { appendNotes, toStringArray } from "./run.js";
 import { appendDebugLog, serializeError } from "./debug-log.js";
 import {
   commitAll,
@@ -11,7 +12,6 @@ import {
   getHeadCommit,
   resetHard,
 } from "./git.js";
-import { appendNotes } from "./run.js";
 import { buildIterationPrompt } from "../templates/iteration-prompt.js";
 
 export interface IterationRecord {
@@ -430,8 +430,8 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
       this.runInfo.notesPath,
       this.state.currentIteration,
       output.summary,
-      output.key_changes_made,
-      output.key_learnings,
+      toStringArray(output.key_changes_made),
+      toStringArray(output.key_learnings),
     );
     commitAll(
       `gnhf #${this.state.currentIteration}: ${output.summary}`,
@@ -447,8 +447,8 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
       number: this.state.currentIteration,
       success: true,
       summary: output.summary,
-      keyChanges: output.key_changes_made,
-      keyLearnings: output.key_learnings,
+      keyChanges: toStringArray(output.key_changes_made),
+      keyLearnings: toStringArray(output.key_learnings),
       timestamp: new Date(),
     };
   }
@@ -463,7 +463,7 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
       this.state.currentIteration,
       notesSummary,
       [],
-      learnings,
+      toStringArray(learnings),
     );
     resetHard(this.cwd);
     this.state.failCount++;
@@ -473,7 +473,7 @@ export class Orchestrator extends EventEmitter<OrchestratorEvents> {
       success: false,
       summary: recordSummary,
       keyChanges: [],
-      keyLearnings: learnings,
+      keyLearnings: toStringArray(learnings),
       timestamp: new Date(),
     };
   }

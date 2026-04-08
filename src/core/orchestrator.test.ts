@@ -8,9 +8,13 @@ vi.mock("./git.js", () => ({
   resetHard: vi.fn(),
 }));
 
-vi.mock("./run.js", () => ({
-  appendNotes: vi.fn(),
-}));
+vi.mock("./run.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./run.js")>();
+  return {
+    ...actual,
+    appendNotes: vi.fn(),
+  };
+});
 
 vi.mock("./debug-log.js", () => ({
   appendDebugLog: vi.fn(),
@@ -70,6 +74,148 @@ function createSuccessResult(summary = "done"): AgentResult {
     },
   };
 }
+
+describe("Orchestrator output normalization", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useRealTimers();
+  });
+
+  it("handles key_changes_made returned as a JSON string instead of an array", async () => {
+    const agent: Agent = {
+      name: "claude",
+      run: vi.fn(
+        async () =>
+          ({
+            output: {
+              success: true,
+              summary: "done",
+              key_changes_made: '["file.ts", "other.ts"]',
+              key_learnings: ["learning"],
+            },
+            usage: {
+              inputTokens: 0,
+              outputTokens: 0,
+              cacheReadTokens: 0,
+              cacheCreationTokens: 0,
+            },
+          }) as unknown as AgentResult,
+      ),
+    };
+    const orchestrator = new Orchestrator(
+      config,
+      agent,
+      runInfo,
+      "ship it",
+      "/repo",
+      0,
+      { maxIterations: 1 },
+    );
+
+    await orchestrator.start();
+
+    expect(mockAppendNotes).toHaveBeenCalledTimes(1);
+    expect(mockAppendNotes).toHaveBeenCalledWith(
+      runInfo.notesPath,
+      1,
+      "done",
+      ["file.ts", "other.ts"],
+      ["learning"],
+    );
+    expect(mockCommitAll).toHaveBeenCalledTimes(1);
+    expect(orchestrator.getState().status).toBe("aborted");
+  });
+
+  it("handles key_learnings returned as a JSON string instead of an array", async () => {
+    const agent: Agent = {
+      name: "claude",
+      run: vi.fn(
+        async () =>
+          ({
+            output: {
+              success: true,
+              summary: "done",
+              key_changes_made: ["file.ts"],
+              key_learnings: '["first lesson", "second lesson"]',
+            },
+            usage: {
+              inputTokens: 0,
+              outputTokens: 0,
+              cacheReadTokens: 0,
+              cacheCreationTokens: 0,
+            },
+          }) as unknown as AgentResult,
+      ),
+    };
+    const orchestrator = new Orchestrator(
+      config,
+      agent,
+      runInfo,
+      "ship it",
+      "/repo",
+      0,
+      { maxIterations: 1 },
+    );
+
+    await orchestrator.start();
+
+    expect(mockAppendNotes).toHaveBeenCalledTimes(1);
+    expect(mockAppendNotes).toHaveBeenCalledWith(
+      runInfo.notesPath,
+      1,
+      "done",
+      ["file.ts"],
+      ["first lesson", "second lesson"],
+    );
+    expect(mockCommitAll).toHaveBeenCalledTimes(1);
+    expect(orchestrator.getState().status).toBe("aborted");
+  });
+
+  it("falls back to single-element array when key_changes_made is a non-JSON string", async () => {
+    const agent: Agent = {
+      name: "claude",
+      run: vi.fn(
+        async () =>
+          ({
+            output: {
+              success: true,
+              summary: "done",
+              key_changes_made: "malformed output",
+              key_learnings: [],
+            },
+            usage: {
+              inputTokens: 0,
+              outputTokens: 0,
+              cacheReadTokens: 0,
+              cacheCreationTokens: 0,
+            },
+          }) as unknown as AgentResult,
+      ),
+    };
+    const orchestrator = new Orchestrator(
+      config,
+      agent,
+      runInfo,
+      "ship it",
+      "/repo",
+      0,
+      { maxIterations: 1 },
+    );
+
+    await orchestrator.start();
+
+    expect(mockAppendNotes).toHaveBeenCalledTimes(1);
+    expect(mockAppendNotes).toHaveBeenCalledWith(
+      runInfo.notesPath,
+      1,
+      "done",
+      ["malformed output"],
+      [],
+    );
+    expect(mockCommitAll).toHaveBeenCalledTimes(1);
+    expect(orchestrator.getState().status).toBe("aborted");
+  });
+});
 
 describe("Orchestrator stop limits", () => {
   beforeEach(() => {

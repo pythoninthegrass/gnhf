@@ -154,6 +154,24 @@ export function getLastIterationNumber(runInfo: RunInfo): number {
   return max;
 }
 
+export function toStringArray(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value.filter((v): v is string => typeof v === "string");
+  }
+  if (typeof value === "string") {
+    try {
+      const parsed = JSON.parse(value);
+      if (Array.isArray(parsed)) {
+        return parsed.filter((v): v is string => typeof v === "string");
+      }
+    } catch {
+      // Not JSON — fall through to render raw
+    }
+    return [value];
+  }
+  return [];
+}
+
 function formatListSection(title: string, items: string[]): string {
   if (items.length === 0) return "";
   return `**${title}:**\n${items.map((item) => `- ${item}`).join("\n")}\n`;
