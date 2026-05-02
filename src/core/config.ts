@@ -17,8 +17,33 @@ export const AGENT_NAMES = [
 
 export type AgentName = (typeof AGENT_NAMES)[number];
 
+// Agents reached via the bundled acpx runtime: any target acpx's agent
+// registry resolves (gemini, cursor, droid, ...). Always written as
+// "acp:<target>" so the prefix routes to AcpAgent in the factory.
+export type AcpAgentSpec = `acp:${string}`;
+
+export type AgentSpec = AgentName | AcpAgentSpec;
+
+const ACP_SPEC_PATTERN = /^acp:[A-Za-z0-9][A-Za-z0-9._:-]*$/;
+
+export function isAgentName(name: string): name is AgentName {
+  return (AGENT_NAMES as readonly string[]).includes(name);
+}
+
+export function isAcpSpec(spec: string): spec is AcpAgentSpec {
+  return ACP_SPEC_PATTERN.test(spec);
+}
+
+export function isAgentSpec(spec: string): spec is AgentSpec {
+  return isAgentName(spec) || isAcpSpec(spec);
+}
+
+export function getAcpTarget(spec: AcpAgentSpec): string {
+  return spec.slice("acp:".length);
+}
+
 export interface Config {
-  agent: AgentName;
+  agent: AgentSpec;
   agentPathOverride: Partial<Record<AgentName, string>>;
   agentArgsOverride: Partial<Record<AgentName, string[]>>;
   commitMessage?: CommitMessageConfig;
@@ -398,10 +423,10 @@ function serializeConfig(config: Config): string {
     config.agentArgsOverride,
   );
   const lines = [
-    "# Agent to use by default",
+    "# Agent to use by default: native agent name or acp:<target>",
     `agent: ${config.agent}`,
     "",
-    "# Custom paths to agent binaries (optional)",
+    "# Custom paths to native agent binaries (optional)",
     "# Paths may be absolute, bare executable names on PATH,",
     "# ~-prefixed, or relative to this config directory.",
     "# Note: rovodev overrides must point to an acli-compatible binary.",
@@ -411,7 +436,8 @@ function serializeConfig(config: Config): string {
     "#   copilot: /path/to/custom-copilot",
     "#   pi: /path/to/custom-pi",
     "",
-    "# Per-agent CLI arg overrides (optional)",
+    "# Native agent CLI arg overrides (optional)",
+    "# ACP targets do not support path or arg overrides.",
     "# agentArgsOverride:",
     "#   codex:",
     "#     - -m",
