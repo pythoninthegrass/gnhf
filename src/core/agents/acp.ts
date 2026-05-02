@@ -10,6 +10,7 @@ import {
   type AcpxRuntime,
 } from "acpx/runtime";
 import { appendDebugLog, serializeError } from "../debug-log.js";
+import { redactAcpTargetForLogs } from "../config.js";
 import {
   PermanentAgentError,
   validateAgentOutput,
@@ -141,6 +142,75 @@ function createAbortError(): Error {
   return new Error("Agent was aborted");
 }
 
+function redactRawAcpTargetInString(text: string, target: string): string {
+  const redacted = redactAcpTargetForLogs(target);
+  if (redacted === target) return text;
+  return text.split(target).join(redacted);
+}
+
+function redactRawAcpTargetInValue(value: unknown, target: string): unknown {
+  if (typeof value === "string") {
+    return redactRawAcpTargetInString(value, target);
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => redactRawAcpTargetInValue(item, target));
+  }
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, entry]) => [
+        key,
+        redactRawAcpTargetInValue(entry, target),
+      ]),
+    );
+  }
+  return value;
+}
+
+function serializeAcpErrorForLog(
+  error: unknown,
+  target: string,
+): Record<string, unknown> {
+  return redactRawAcpTargetInValue(serializeError(error), target) as Record<
+    string,
+    unknown
+  >;
+}
+
+function redactAcpErrorForThrow(error: unknown, target: string): unknown {
+  const redacted = redactAcpTargetForLogs(target);
+  if (redacted === target) return error;
+  if (error instanceof PermanentAgentError) {
+    return new PermanentAgentError(
+      redactRawAcpTargetInString(error.message, target),
+      redactRawAcpTargetInString(error.detail, target),
+    );
+  }
+  if (error instanceof Error) {
+    let cause: unknown;
+    try {
+      cause = "cause" in error ? error.cause : undefined;
+    } catch {
+      cause = undefined;
+    }
+    const redactedCause =
+      cause === undefined ? undefined : redactAcpErrorForThrow(cause, target);
+    const redactedError = new Error(
+      redactRawAcpTargetInString(error.message, target),
+      redactedCause === undefined ? undefined : { cause: redactedCause },
+    );
+    redactedError.name = error.name;
+    if (typeof error.stack === "string") {
+      redactedError.stack = redactRawAcpTargetInString(error.stack, target);
+    }
+    const code = (error as { code?: unknown }).code;
+    if (code !== undefined) {
+      (redactedError as { code?: unknown }).code = code;
+    }
+    return redactedError;
+  }
+  return redactRawAcpTargetInValue(error, target);
+}
+
 // Rough character-to-token heuristic. ACP's runtime only surfaces a cumulative
 // `used` context size via usage_update status events, and many adapters never
 // emit those. Estimating from text length gives the user a non-zero, vaguely
@@ -205,17 +275,22 @@ export class AcpAgent implements Agent {
     }
 
     const runtime = this.ensureRuntime(cwd);
-    const handle = await runtime.ensureSession({
-      sessionKey: this.runId,
-      agent: this.target,
-      mode: "persistent",
-      cwd,
-    });
+    let handle: AcpRuntimeHandle;
+    try {
+      handle = await runtime.ensureSession({
+        sessionKey: this.runId,
+        agent: this.target,
+        mode: "persistent",
+        cwd,
+      });
+    } catch (error) {
+      throw redactAcpErrorForThrow(error, this.target);
+    }
     this.handle = handle;
 
     const requestId = randomUUID();
     appendDebugLog("acp:turn:start", {
-      target: this.target,
+      target: redactAcpTargetForLogs(this.target),
       sessionKey: this.runId,
       requestId,
       cwd,
@@ -224,15 +299,26 @@ export class AcpAgent implements Agent {
     const acpPrompt = buildAcpPrompt(prompt, this.schema);
     const promptTokenEstimate = estimateTokens(acpPrompt.length);
 
-    const turn = runtime.startTurn({
-      handle,
-      text: acpPrompt,
-      mode: "prompt",
-      requestId,
-      signal,
-    });
-
     const startedAt = Date.now();
+    const turn = (() => {
+      try {
+        return runtime.startTurn({
+          handle,
+          text: acpPrompt,
+          mode: "prompt",
+          requestId,
+          signal,
+        });
+      } catch (error) {
+        appendDebugLog("acp:turn:start-error", {
+          target: redactAcpTargetForLogs(this.target),
+          requestId,
+          elapsedMs: Date.now() - startedAt,
+          error: serializeAcpErrorForLog(error, this.target),
+        });
+        throw redactAcpErrorForThrow(error, this.target);
+      }
+    })();
     const iterationStartUsed = this.lastReportedUsed;
     let latestUsed = iterationStartUsed;
     // Whether any usage_update status event has set `used` for this run.
@@ -364,24 +450,24 @@ export class AcpAgent implements Agent {
         if (signal?.aborted || isAbortError(error)) {
           await turn.cancel({ reason: "gnhf-aborted" }).catch(() => undefined);
           appendDebugLog("acp:turn:aborted", {
-            target: this.target,
+            target: redactAcpTargetForLogs(this.target),
             requestId,
             elapsedMs: Date.now() - startedAt,
           });
           throw createAbortError();
         }
         appendDebugLog("acp:turn:stream-error", {
-          target: this.target,
+          target: redactAcpTargetForLogs(this.target),
           requestId,
           elapsedMs: Date.now() - startedAt,
-          error: serializeError(error),
+          error: serializeAcpErrorForLog(error, this.target),
         });
-        throw error;
+        throw redactAcpErrorForThrow(error, this.target);
       }
 
       const result: AcpRuntimeTurnResult = await turn.result;
       appendDebugLog("acp:turn:result", {
-        target: this.target,
+        target: redactAcpTargetForLogs(this.target),
         requestId,
         status: result.status,
         stopReason:
@@ -399,7 +485,10 @@ export class AcpAgent implements Agent {
         throw createAbortError();
       }
       if (result.status === "failed") {
-        const message = result.error.message || "ACP turn failed";
+        const message = redactRawAcpTargetInString(
+          result.error.message || "ACP turn failed",
+          this.target,
+        );
         if (result.error.retryable === false) {
           throw new PermanentAgentError(
             message,
@@ -460,11 +549,13 @@ export class AcpAgent implements Agent {
     this.handle = null;
     try {
       await runtime.close({ handle, reason: "gnhf-shutdown" });
-      appendDebugLog("acp:close", { target: this.target });
+      appendDebugLog("acp:close", {
+        target: redactAcpTargetForLogs(this.target),
+      });
     } catch (error) {
       appendDebugLog("acp:close-error", {
-        target: this.target,
-        error: serializeError(error),
+        target: redactAcpTargetForLogs(this.target),
+        error: serializeAcpErrorForLog(error, this.target),
       });
     }
   }
@@ -484,7 +575,7 @@ export class AcpAgent implements Agent {
     });
     this.runtime = runtime;
     appendDebugLog("acp:runtime:created", {
-      target: this.target,
+      target: redactAcpTargetForLogs(this.target),
       sessionStateDir: this.sessionStateDir,
       cwd,
     });

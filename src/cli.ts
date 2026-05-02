@@ -19,6 +19,7 @@ import {
   AGENT_NAMES,
   isAgentSpec,
   loadConfig,
+  redactAgentSpecForLogs,
   type AgentName,
   type AgentSpec,
 } from "./core/config.js";
@@ -70,7 +71,7 @@ const AGENT_NAME_SET = new Set<string>(AGENT_NAMES);
 const AGENT_NAME_LIST = `"${AGENT_NAMES.slice(0, -1).join('", "')}", or "${
   AGENT_NAMES[AGENT_NAMES.length - 1]
 }"`;
-const AGENT_SPEC_LIST = `${AGENT_NAME_LIST}, or "acp:<target>" (e.g. acp:gemini)`;
+const AGENT_SPEC_LIST = `${AGENT_NAME_LIST}, or "acp:<target-or-command>" (e.g. acp:gemini)`;
 
 class PromptSignalError extends Error {
   constructor(public readonly signal: NodeJS.Signals) {
@@ -113,6 +114,31 @@ function isAgentName(name: string): name is AgentName {
 
 function getNativeAgentName(spec: AgentSpec): AgentName | undefined {
   return isAgentName(spec) ? spec : undefined;
+}
+
+function getTelemetryAgent(spec: AgentSpec): string {
+  return redactAgentSpecForLogs(spec);
+}
+
+function redactDebugArgs(args: string[]): string[] {
+  const redacted = [...args];
+  for (let i = 0; i < redacted.length; i += 1) {
+    const arg = redacted[i];
+    if (arg === "--") break;
+    if (arg === "--agent") {
+      const next = redacted[i + 1];
+      if (next !== undefined) {
+        redacted[i + 1] = redactAgentSpecForLogs(next);
+        i += 1;
+      }
+      continue;
+    }
+    if (arg?.startsWith("--agent=")) {
+      redacted[i] =
+        `--agent=${redactAgentSpecForLogs(arg.slice("--agent=".length))}`;
+    }
+  }
+  return redacted;
 }
 
 function buildSchemaOptions(
@@ -454,7 +480,7 @@ program
   .argument("[prompt]", "The objective for the coding agent")
   .option(
     "--agent <agent>",
-    `Agent to use (${AGENT_NAMES.join(", ")}, or acp:<target>)`,
+    `Agent to use (${AGENT_NAMES.join(", ")}, or acp:<target-or-command>)`,
   )
   .option(
     "--max-iterations <n>",
@@ -767,17 +793,18 @@ program
           ? "resume"
           : "new";
 
+      const telemetryAgent = getTelemetryAgent(config.agent);
       telemetry.pageview("/run", {
-        agent: config.agent,
+        agent: telemetryAgent,
         mode: runMode,
       });
 
       initDebugLog(runInfo.logPath);
       appendDebugLog("run:start", {
-        args: process.argv.slice(2),
+        args: redactDebugArgs(process.argv.slice(2)),
         runId: runInfo.runId,
         runDir: runInfo.runDir,
-        agent: config.agent,
+        agent: redactAgentSpecForLogs(config.agent),
         promptLength: prompt.length,
         promptFromStdin,
         startIteration,
@@ -927,7 +954,7 @@ program
         });
 
         telemetry.track("run", {
-          agent: config.agent,
+          agent: telemetryAgent,
           mode: runMode,
           status: finalState.status,
           signal: shutdownSignal ?? undefined,
