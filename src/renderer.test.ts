@@ -12,6 +12,7 @@ import {
   buildFrame,
   buildFrameCells,
   buildContentCells,
+  generateSideMeteorShower,
 } from "./renderer.js";
 import { rowToString } from "./renderer-diff.js";
 import type {
@@ -970,6 +971,130 @@ describe("Renderer ctrl+c", () => {
     expect(onInterrupt).toHaveBeenCalledTimes(1);
     expect(orchestratorStop).not.toHaveBeenCalled();
     expect(pause).not.toHaveBeenCalled();
+  });
+});
+
+describe("Renderer meteors", () => {
+  function renderContentSideText(
+    meteorFrequency: number,
+    terminalHeight = 46,
+  ): string {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const state: OrchestratorState = {
+      status: "running",
+      gracefulStopRequested: false,
+      interruptHint: "resume",
+      currentIteration: 1,
+      totalInputTokens: 0,
+      totalOutputTokens: 0,
+      tokensEstimated: false,
+      commitCount: 0,
+      iterations: [],
+      successCount: 0,
+      failCount: 0,
+      consecutiveFailures: 0,
+      consecutiveErrors: 0,
+      startTime: new Date(0),
+      waitingUntil: null,
+      lastMessage: null,
+    };
+    const orchestrator = Object.assign(new EventEmitter(), {
+      getState: vi.fn(() => state),
+      stop: vi.fn(),
+    }) as unknown as Orchestrator;
+    const stdoutWrite = vi
+      .spyOn(process.stdout, "write")
+      .mockImplementation(() => true);
+    const random = vi.spyOn(Math, "random").mockReturnValue(0);
+    const originalStdinTty = Object.getOwnPropertyDescriptor(
+      process.stdin,
+      "isTTY",
+    );
+    const originalColumns = Object.getOwnPropertyDescriptor(
+      process.stdout,
+      "columns",
+    );
+    const originalRows = Object.getOwnPropertyDescriptor(
+      process.stdout,
+      "rows",
+    );
+    Object.defineProperty(process.stdin, "isTTY", {
+      configurable: true,
+      value: false,
+    });
+    Object.defineProperty(process.stdout, "columns", {
+      configurable: true,
+      value: 121,
+    });
+    Object.defineProperty(process.stdout, "rows", {
+      configurable: true,
+      value: terminalHeight,
+    });
+
+    try {
+      const renderer = new Renderer(
+        orchestrator,
+        "ship it",
+        "claude",
+        vi.fn(),
+        {
+          meteorFrequency,
+        },
+      );
+      renderer.start();
+      renderer.stop();
+
+      const output = stdoutWrite.mock.calls
+        .map((args: unknown[]) => String(args[0]))
+        .join("");
+      const frame = output.startsWith("\x1b[H") ? output.slice(3) : output;
+      const lines = frame.split("\n").map(stripAnsi);
+      const sideWidth = Math.floor((121 - 63) / 2);
+      const availableHeight = terminalHeight - 2;
+      const contentRows = buildContentCells(
+        "ship it",
+        "claude",
+        state,
+        "0s",
+        0,
+        availableHeight,
+      );
+      while (contentRows.length < Math.min(24, availableHeight)) {
+        contentRows.push([]);
+      }
+      const topHeight = Math.ceil((availableHeight - contentRows.length) / 2);
+      const contentSideText = lines
+        .slice(topHeight, topHeight + contentRows.length)
+        .map((line) => `${line.slice(0, sideWidth)}${line.slice(-sideWidth)}`)
+        .join("\n");
+
+      return contentSideText;
+    } finally {
+      if (originalRows)
+        Object.defineProperty(process.stdout, "rows", originalRows);
+      if (originalColumns)
+        Object.defineProperty(process.stdout, "columns", originalColumns);
+      if (originalStdinTty)
+        Object.defineProperty(process.stdin, "isTTY", originalStdinTty);
+      random.mockRestore();
+      stdoutWrite.mockRestore();
+      vi.useRealTimers();
+    }
+  }
+
+  it("renders meteors beside the main content area", () => {
+    expect(renderContentSideText(5)).toContain("╱");
+  });
+
+  it("keeps low-frequency side meteors visible on tall terminals", () => {
+    expect(renderContentSideText(1, 100)).toContain("╱");
+  });
+
+  it("honors the lowest side meteor frequency count", () => {
+    const meteors = generateSideMeteorShower(121, 29, 44, 1, 102);
+
+    expect(meteors).toHaveLength(1);
   });
 });
 
