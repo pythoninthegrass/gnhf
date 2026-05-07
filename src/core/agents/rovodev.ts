@@ -7,12 +7,14 @@ import { createWriteStream, readFileSync, type WriteStream } from "node:fs";
 import { createServer } from "node:net";
 import type {
   Agent,
-  AgentOutput,
+  AgentOutputSchema,
   AgentResult,
   AgentRunOptions,
   TokenUsage,
 } from "./types.js";
+import { validateAgentOutput } from "./types.js";
 import { appendDebugLog, serializeError } from "../debug-log.js";
+import { parseAgentJson } from "./json-extract.js";
 import { shutdownChildProcess } from "./managed-process.js";
 
 interface RovoDevRequestUsageEvent {
@@ -55,6 +57,7 @@ function buildSystemPrompt(schema: string): string {
     "When you finish, reply with only valid JSON.",
     "Do not wrap the JSON in markdown fences.",
     "Do not include any prose before or after the JSON.",
+    "Your final assistant message must contain the JSON object only - no preamble, no commentary, no build-status lines, nothing else.",
     `The JSON must match this schema exactly: ${schema}`,
   ].join(" ");
 }
@@ -740,27 +743,54 @@ export class RovoDevAgent implements Agent {
       throw new Error("rovodev returned no text output");
     }
 
-    try {
-      const output = JSON.parse(finalText) as AgentOutput;
-      appendDebugLog("rovodev:output:parsed", {
-        sessionId,
-        outputTextLength: finalText.length,
-      });
-      return {
-        output,
-        usage,
-      };
-    } catch (error) {
+    const schema = JSON.parse(
+      readFileSync(this.schemaPath, "utf-8"),
+    ) as AgentOutputSchema;
+    const parsed = parseAgentJson(finalText, (value) => {
+      try {
+        validateAgentOutput(value, schema);
+        return true;
+      } catch {
+        return false;
+      }
+    });
+    if (parsed === null) {
+      const fallbackParsed = parseAgentJson(finalText);
+      if (fallbackParsed !== null) {
+        try {
+          validateAgentOutput(fallbackParsed, schema);
+        } catch (error) {
+          const message =
+            error instanceof Error ? error.message : String(error);
+          throw new Error(`Failed to parse rovodev output: ${message}`);
+        }
+      }
+      const parseError = new SyntaxError(
+        "rovodev output did not contain a parseable JSON object",
+      );
       appendDebugLog("rovodev:output:parse-error", {
         sessionId,
         outputTextLength: finalText.length,
         outputTextSample: finalText.slice(0, 512),
-        error: serializeError(error),
+        error: serializeError(parseError),
       });
-      throw new Error(
-        `Failed to parse rovodev output: ${error instanceof Error ? error.message : String(error)}`,
-      );
+      throw new Error(`Failed to parse rovodev output: ${parseError.message}`);
     }
+    appendDebugLog("rovodev:output:parsed", {
+      sessionId,
+      outputTextLength: finalText.length,
+    });
+    let output;
+    try {
+      output = validateAgentOutput(parsed, schema);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(`Failed to parse rovodev output: ${message}`);
+    }
+    return {
+      output,
+      usage,
+    };
   }
 
   private async shutdownServer(): Promise<void> {
